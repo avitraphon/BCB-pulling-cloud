@@ -1,20 +1,20 @@
 """
 Pull the 21 BCB SGS credit benchmark series (balance, nominal rate, NPL90
 for INSS/public/CLT payroll, vehicle, mortgage, unsecured personal, overdraft),
-pivot to one row per (month, product), and POST them to a Google Apps Script
-Web App bound to the target Sheet, which does the actual upsert into cells.
+pivot to one row per (month, product), and upsert into a Google Sheet via the
+Sheets API using a service account.
 
 Runs on a schedule via .github/workflows/bcb_sgs_sync.yml — same logic as the
 original n8n workflow, ported to run on GitHub Actions instead of a local box.
-No Google Cloud project / service account needed: the Apps Script Web App
-is deployed under your own Google login directly from the Sheet's
-Extensions > Apps Script menu (see scripts/apps_script/Code.gs).
 """
+import json
 import os
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Any
 
+import gspread
 import requests
+from google.oauth2.service_account import Credentials
 
 SERIES = [
     # INSS
@@ -47,6 +47,10 @@ SERIES = [
     {"product": "Overdraft", "metric": "npl90", "series": 21113, "unit": "pct"},
 ]
 
+SHEET_TAB = "raw_credit_benchmark"
+SHEET_HEADERS = [
+    "reference_month", "product", "balance_brl_bn", "nominal_rate_pa", "npl90", "updated_at",
+]
 
 
 def bcb_date_range(today: date) -> tuple[str, str]:
@@ -125,22 +129,61 @@ def normalize_and_pivot(date_inicial: str, data_final: str) -> list[dict[str, An
     return complete
 
 
-def push_to_sheet(rows: list[dict[str, Any]]) -> None:
-    web_app_url = os.environ["APPS_SCRIPT_URL"]
-    token = os.environ["APPS_SCRIPT_TOKEN"]
+def open_sheet() -> gspread.Worksheet:
+    creds_json = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
+    spreadsheet_id = os.environ["SPREADSHEET_ID"]
 
-    resp = requests.post(
-        web_app_url,
-        json={"token": token, "rows": rows},
-        timeout=30,
+    creds = Credentials.from_service_account_info(
+        json.loads(creds_json),
+        scopes=["https://www.googleapis.com/auth/spreadsheets"],
     )
-    resp.raise_for_status()
+    client = gspread.authorize(creds)
+    spreadsheet = client.open_by_key(spreadsheet_id)
 
-    result = resp.json()
-    if not result.get("ok"):
-        raise RuntimeError(f"Apps Script upsert failed: {result}")
+    try:
+        ws = spreadsheet.worksheet(SHEET_TAB)
+    except gspread.WorksheetNotFound:
+        ws = spreadsheet.add_worksheet(title=SHEET_TAB, rows=1000, cols=len(SHEET_HEADERS))
+        ws.append_row(SHEET_HEADERS)
 
-    print(f"Updated {result.get('updated', 0)} row(s), appended {result.get('appended', 0)} new row(s).")
+    return ws
+
+
+def upsert_rows(ws: gspread.Worksheet, rows: list[dict[str, Any]]) -> None:
+    existing = ws.get_all_values()
+    if not existing:
+        ws.append_row(SHEET_HEADERS)
+        existing = [SHEET_HEADERS]
+
+    key_index = {(r[0], r[1]): i for i, r in enumerate(existing[1:], start=2) if len(r) >= 2}
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    updates = []
+    appends = []
+
+    for row in rows:
+        key = (row["reference_month"], row["product"])
+        values = [
+            row["reference_month"],
+            row["product"],
+            row["balance_brl_bn"],
+            row["nominal_rate_pa"],
+            row["npl90"],
+            now_iso,
+        ]
+        if key in key_index:
+            updates.append((key_index[key], values))
+        else:
+            appends.append(values)
+
+    for row_num, values in updates:
+        ws.update(f"A{row_num}:F{row_num}", [values])
+
+    if appends:
+        ws.append_rows(appends)
+
+    print(f"Updated {len(updates)} row(s), appended {len(appends)} new row(s).")
 
 
 def main() -> None:
@@ -151,7 +194,8 @@ def main() -> None:
     rows = normalize_and_pivot(date_inicial, data_final)
     print(f"{len(rows)} complete (month, product) row(s) ready to write.")
 
-    push_to_sheet(rows)
+    ws = open_sheet()
+    upsert_rows(ws, rows)
 
 
 if __name__ == "__main__":
