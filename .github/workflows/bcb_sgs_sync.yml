@@ -1,0 +1,26 @@
+name: BCB SGS Credit Benchmark Sync
+
+on:
+  schedule:
+    # 5th, 15th and 25th of every month, 09:00 UTC (06:00 America/Sao_Paulo)
+    - cron: "0 9 5,15,25 * *"
+  workflow_dispatch: {}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r scripts/requirements.txt
+
+      - name: Run BCB SGS sync
+        env:
+          APPS_SCRIPT_URL: ${{ secrets.APPS_SCRIPT_URL }}
+          APPS_SCRIPT_TOKEN: ${{ secrets.APPS_SCRIPT_TOKEN }}
+        run: python scripts/bcb_sgs_sync.py

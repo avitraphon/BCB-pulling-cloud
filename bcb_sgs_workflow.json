@@ -1,0 +1,149 @@
+{
+  "name": "BCB SGS Credit Benchmark",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 6 5,15,25 * *"
+            }
+          ]
+        }
+      },
+      "id": "1f1a1b1c-0001-4a2b-8c3d-000000000001",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-1120, 300]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const now = new Date();\n\n// Last completed month\nconst end = new Date(now.getFullYear(), now.getMonth(), 0);\n\n// Start 3 months before end -> total 4 months\nconst start = new Date(end.getFullYear(), end.getMonth() - 3, 1);\n\nfunction formatBCBDate(date) {\n  return String(date.getDate()).padStart(2, '0') + '/' +\n    String(date.getMonth() + 1).padStart(2, '0') + '/' +\n    date.getFullYear();\n}\n\nconst dateInicial = formatBCBDate(start);\nconst dataFinal = formatBCBDate(end);\n\nconst series = [\n  // INSS\n  { product: \"INSS payroll loans\", metric: \"balance\", series: 20578, unit: \"BRL_mn\" },\n  { product: \"INSS payroll loans\", metric: \"nominal_rate_pa\", series: 20746, unit: \"pct_pa\" },\n  { product: \"INSS payroll loans\", metric: \"npl90\", series: 21118, unit: \"pct\" },\n\n  // Public payroll\n  { product: \"Public-sector payroll loans\", metric: \"balance\", series: 20577, unit: \"BRL_mn\" },\n  { product: \"Public-sector payroll loans\", metric: \"nominal_rate_pa\", series: 20745, unit: \"pct_pa\" },\n  { product: \"Public-sector payroll loans\", metric: \"npl90\", series: 21117, unit: \"pct\" },\n\n  // CLT / private payroll\n  { product: \"Private-sector / CLT payroll loans\", metric: \"balance\", series: 20576, unit: \"BRL_mn\" },\n  { product: \"Private-sector / CLT payroll loans\", metric: \"nominal_rate_pa\", series: 20744, unit: \"pct_pa\" },\n  { product: \"Private-sector / CLT payroll loans\", metric: \"npl90\", series: 21116, unit: \"pct\" },\n\n  // Vehicle\n  { product: \"Vehicle financing\", metric: \"balance\", series: 20581, unit: \"BRL_mn\" },\n  { product: \"Vehicle financing\", metric: \"nominal_rate_pa\", series: 20749, unit: \"pct_pa\" },\n  { product: \"Vehicle financing\", metric: \"npl90\", series: 21121, unit: \"pct\" },\n\n  // Mortgage\n  { product: \"Mortgage\", metric: \"balance\", series: 20612, unit: \"BRL_mn\" },\n  { product: \"Mortgage\", metric: \"nominal_rate_pa\", series: 20774, unit: \"pct_pa\" },\n  { product: \"Mortgage\", metric: \"npl90\", series: 21151, unit: \"pct\" },\n\n  // Unsecured Personal Loan\n  { product: \"Unsecured Personal Loans\", metric: \"balance\", series: 29965, unit: \"BRL_mn\" },\n  { product: \"Unsecured Personal Loans\", metric: \"nominal_rate_pa\", series: 29974, unit: \"pct_pa\" },\n  { product: \"Unsecured Personal Loans\", metric: \"npl90\", series: 29992, unit: \"pct\" },\n\n  // Overdraft\n  { product: \"Overdraft\", metric: \"balance\", series: 20573, unit: \"BRL_mn\" },\n  { product: \"Overdraft\", metric: \"nominal_rate_pa\", series: 20741, unit: \"pct_pa\" },\n  { product: \"Overdraft\", metric: \"npl90\", series: 21113, unit: \"pct\" }\n];\n\nreturn series.map(s => ({\n  json: {\n    ...s,\n    dateInicial,\n    dataFinal\n  }\n}));"
+      },
+      "id": "1f1a1b1c-0002-4a2b-8c3d-000000000002",
+      "name": "Build BCB Series Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-880, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.bcb.gov.br/dados/serie/bcdata.sgs.{{$json.series}}/dados",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "formato", "value": "json" },
+            { "name": "dataInicial", "value": "={{$json.dateInicial}}" },
+            { "name": "dataFinal", "value": "={{$json.dataFinal}}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "1f1a1b1c-0003-4a2b-8c3d-000000000003",
+      "name": "Get BCB Series",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-640, 300]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Robust to both HTTP Request output shapes:\n// - \"Split Into Items\" OFF (default): each item.json is the full array response for one series\n// - \"Split Into Items\" ON: each item.json is a single { data, valor } row, item.pairedItem.item points at the config item\n\nconst input = $input.all();\nconst configItems = $('Build BCB Series Config').all();\nconst output = [];\n\nfunction toRow(row, config) {\n  let value = Number(String(row.valor).replace(',', '.'));\n\n  // Balance: R$ million -> R$ billion\n  if (config.unit === 'BRL_mn') {\n    value = value / 1000;\n  }\n\n  const [day, month, year] = row.data.split('/');\n\n  return {\n    json: {\n      reference_month: `${year}-${month}`,\n      product: config.product,\n      metric: config.metric,\n      value: value,\n      source: \"BCB SGS\",\n      series: config.series,\n      retrieved_at: new Date().toISOString()\n    }\n  };\n}\n\nfor (const item of input) {\n  const pairedIndex = item.pairedItem?.item ?? 0;\n  const config = configItems[pairedIndex].json;\n\n  const body = item.json?.body ?? item.json;\n\n  if (Array.isArray(body)) {\n    // Whole-array-in-one-item shape\n    for (const row of body) {\n      output.push(toRow(row, config));\n    }\n  } else if (body && typeof body === 'object' && 'data' in body && 'valor' in body) {\n    // Split-into-items shape: this item IS one row\n    output.push(toRow(body, config));\n  }\n}\n\nreturn output;"
+      },
+      "id": "1f1a1b1c-0004-4a2b-8c3d-000000000004",
+      "name": "Normalize BCB Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-400, 300]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const items = $input.all();\n\nconst grouped = {};\n\nfor (const item of items) {\n  const r = item.json;\n\n  const key = `${r.reference_month}|${r.product}`;\n\n  if (!grouped[key]) {\n    grouped[key] = {\n      reference_month: r.reference_month,\n      product: r.product,\n      balance_brl_bn: null,\n      nominal_rate_pa: null,\n      npl90: null\n    };\n  }\n\n  if (r.metric === 'balance') grouped[key].balance_brl_bn = r.value;\n  if (r.metric === 'nominal_rate_pa') grouped[key].nominal_rate_pa = r.value;\n  if (r.metric === 'npl90') grouped[key].npl90 = r.value;\n}\n\nreturn Object.values(grouped)\n  .sort((a, b) =>\n    a.reference_month.localeCompare(b.reference_month) ||\n    a.product.localeCompare(b.product)\n  )\n  .map(row => ({ json: row }));"
+      },
+      "id": "1f1a1b1c-0005-4a2b-8c3d-000000000005",
+      "name": "Pivot Product Metrics",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-160, 300]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const rows = $input.all();\nconst complete = [];\nconst incomplete = [];\n\nfor (const item of rows) {\n  const r = item.json;\n\n  const isComplete =\n    r.balance_brl_bn !== null &&\n    r.nominal_rate_pa !== null &&\n    r.npl90 !== null;\n\n  if (isComplete) {\n    complete.push(item);\n  } else {\n    incomplete.push({ json: { ...r, status: 'INCOMPLETE' } });\n  }\n}\n\nif (incomplete.length) {\n  console.log('Incomplete rows (not written):', JSON.stringify(incomplete.map(i => i.json)));\n}\n\nreturn complete;"
+      },
+      "id": "1f1a1b1c-0006-4a2b-8c3d-000000000006",
+      "name": "Validate & Drop Incomplete",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [80, 300]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "PUT_YOUR_GOOGLE_SHEET_ID_HERE"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "raw_credit_benchmark"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "matchingColumns": ["reference_month", "product"],
+          "value": {
+            "reference_month": "={{$json.reference_month}}",
+            "product": "={{$json.product}}",
+            "balance_brl_bn": "={{$json.balance_brl_bn}}",
+            "nominal_rate_pa": "={{$json.nominal_rate_pa}}",
+            "npl90": "={{$json.npl90}}",
+            "updated_at": "={{ new Date().toISOString() }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "1f1a1b1c-0007-4a2b-8c3d-000000000007",
+      "name": "Upsert to Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [320, 300],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [[{ "node": "Build BCB Series Config", "type": "main", "index": 0 }]]
+    },
+    "Build BCB Series Config": {
+      "main": [[{ "node": "Get BCB Series", "type": "main", "index": 0 }]]
+    },
+    "Get BCB Series": {
+      "main": [[{ "node": "Normalize BCB Data", "type": "main", "index": 0 }]]
+    },
+    "Normalize BCB Data": {
+      "main": [[{ "node": "Pivot Product Metrics", "type": "main", "index": 0 }]]
+    },
+    "Pivot Product Metrics": {
+      "main": [[{ "node": "Validate & Drop Incomplete", "type": "main", "index": 0 }]]
+    },
+    "Validate & Drop Incomplete": {
+      "main": [[{ "node": "Upsert to Google Sheets", "type": "main", "index": 0 }]]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "bcb-sgs-credit-benchmark"
+  }
+}
