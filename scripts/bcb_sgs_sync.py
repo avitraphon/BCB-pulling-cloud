@@ -15,6 +15,8 @@ from typing import Any
 import gspread
 import requests
 from google.oauth2.service_account import Credentials
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 SERIES = [
     # INSS
@@ -72,12 +74,24 @@ def bcb_date_range(today: date) -> tuple[str, str]:
     return start.strftime("%d/%m/%Y"), end.strftime("%d/%m/%Y")
 
 
+_session = requests.Session()
+_session.mount(
+    "https://",
+    HTTPAdapter(max_retries=Retry(
+        total=4,
+        backoff_factor=2,  # 2s, 4s, 8s, 16s between retries
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET"],
+    )),
+)
+
+
 def fetch_series(series_id: int, date_inicial: str, data_final: str) -> list[dict[str, Any]]:
     url = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{series_id}/dados"
-    resp = requests.get(
+    resp = _session.get(
         url,
         params={"formato": "json", "dataInicial": date_inicial, "dataFinal": data_final},
-        timeout=30,
+        timeout=60,
     )
     resp.raise_for_status()
     return resp.json()
